@@ -1701,106 +1701,148 @@ module.exports = {
               await fsP.copyFile(source, src.from)
               applied.push(src.to)
             } catch {}
-          } else if (group.name === 'sessions' && eff.downloadWorkspacePath && String(eff.downloadWorkspacePath).trim() !== '') {
-            const targetWorkspacePath = String(eff.downloadWorkspacePath).trim()
-            finalWorkspacePath = targetWorkspacePath
-            const targetDirName = encodeWorkspaceDir(targetWorkspacePath)
+          } else if (group.name === 'sessions') {
+            const zlib2 = require('node:zlib')
+            let localWorkspaces = []
+            try {
+              const wsFile2 = join(dshHome(), 'storages', 'workspace.json')
+              const wsData2 = JSON.parse(await fsP.readFile(wsFile2, 'utf8'))
+              const wsTable2 = (wsData2.tables && wsData2.tables.workspaces) || {}
+              localWorkspaces = Object.entries(wsTable2).map(([id, w]) => ({ id, path: w.path, title: w.title }))
+            } catch {}
             const localRoot = src.from
             await fsP.mkdir(localRoot, { recursive: true })
-            const targetWs = join(localRoot, targetDirName)
-            await fsP.rm(targetWs, { recursive: true, force: true }).catch(() => {})
-            await fsP.mkdir(targetWs, { recursive: true })
-            const downloadedSessionIds = []
-            let wsDirs = []
-            try { wsDirs = await fsP.readdir(source, { withFileTypes: true }) } catch {}
-            for (const ws of wsDirs) {
-              if (!ws.isDirectory()) continue
-              const srcWs = join(source, ws.name)
-              let sessions = []
-              try { sessions = await fsP.readdir(srcWs, { withFileTypes: true }) } catch {}
-              for (const s of sessions) {
-                if (!s.isDirectory()) continue
-                await copyTree(join(srcWs, s.name), join(targetWs, s.name), {})
-                if (!downloadedSessionIds.includes(s.name)) downloadedSessionIds.push(s.name)
-                if (!allDownloadedSessionIds.includes(s.name)) allDownloadedSessionIds.push(s.name)
+            let cloudWsDirs = []
+            try { cloudWsDirs = await fsP.readdir(source, { withFileTypes: true }) } catch {}
+            const byWorkspace = {}
+            for (const cws of cloudWsDirs) {
+              if (!cws.isDirectory()) continue
+              const cwsPath = join(source, cws.name)
+              let sessionsList = []
+              try { sessionsList = await fsP.readdir(cwsPath, { withFileTypes: true }) } catch {}
+              let cloudBase = null
+              for (const se of sessionsList) {
+                if (!se.isDirectory()) continue
+                let files = []
+                try { files = await fsP.readdir(join(cwsPath, se.name)) } catch {}
+                const zst = files.find(x => x.endsWith('.zstd'))
+                if (!zst) continue
+                try {
+                  const buf = await fsP.readFile(join(cwsPath, se.name, zst))
+                  const text = zlib2.zstdDecompressSync(buf).toString('utf8')
+                  const header = JSON.parse(text.split('\n')[0])
+                  if (header.cwd) {
+                    cloudBase = String(header.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+                    break
+                  }
+                } catch {}
               }
+              if (!cloudBase) continue
+              let targetWs = localWorkspaces.find(w => {
+                const b = String(w.path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+                return b === cloudBase || w.title === cloudBase
+              })
+              if (!targetWs) {
+                const fallback = (eff.downloadWorkspacePath && String(eff.downloadWorkspacePath).trim()) || (localWorkspaces[0] && localWorkspaces[0].path)
+                if (!fallback) continue
+                targetWs = { id: null, path: fallback, title: cloudBase }
+              }
+              const targetWorkspacePath = targetWs.path
+              const targetDirName = encodeWorkspaceDir(targetWorkspacePath)
+              const targetWsDir = join(localRoot, targetDirName)
+              await fsP.mkdir(targetWsDir, { recursive: true })
+              const cwsSessionIds = []
+              for (const se of sessionsList) {
+                if (!se.isDirectory()) continue
+                const dstSession = join(targetWsDir, se.name)
+                await fsP.rm(dstSession, { recursive: true, force: true }).catch(() => {})
+                await copyTree(join(cwsPath, se.name), dstSession, {})
+                cwsSessionIds.push(se.name)
+                if (!downloadedSessionIds.includes(se.name)) downloadedSessionIds.push(se.name)
+                if (!allDownloadedSessionIds.includes(se.name)) allDownloadedSessionIds.push(se.name)
+              }
+              try {
+                const walkFix2 = async (dir) => {
+                  let ents = []
+                  try { ents = await fsP.readdir(dir, { withFileTypes: true }) } catch { return }
+                  for (const ent of ents) {
+                    const full = join(dir, ent.name)
+                    if (ent.isDirectory()) { await walkFix2(full); continue }
+                    if (!ent.name.endsWith('.zstd')) continue
+                    try {
+                      const buf = await fsP.readFile(full)
+                      const positions = []
+                      for (let k = 0; k <= buf.length - 4; k++) {
+                        if (buf[k] === 0x28 && buf[k+1] === 0xB5 && buf[k+2] === 0x2F && buf[k+3] === 0xFD) positions.push(k)
+                      }
+                      if (positions.length === 0) continue
+                      const firstFrameEnd = positions.length > 1 ? positions[1] : buf.length
+                      const headerFrame = buf.slice(0, firstFrameEnd)
+                      const restFrames = positions.length > 1 ? buf.slice(firstFrameEnd) : Buffer.alloc(0)
+                      const text = zlib2.zstdDecompressSync(headerFrame).toString('utf8')
+                      const lines = text.split('\n')
+                      if (!lines[0]) continue
+                      const obj = JSON.parse(lines[0])
+                      if (obj.cwd === targetWorkspacePath) continue
+                      obj.cwd = targetWorkspacePath
+                      lines[0] = JSON.stringify(obj)
+                      const newHeaderFrame = zlib2.zstdCompressSync(Buffer.from(lines.join('\n'), 'utf8'))
+                      const out = Buffer.concat([newHeaderFrame, restFrames])
+                      await fsP.writeFile(full, out)
+                    } catch {}
+                  }
+                }
+                await walkFix2(targetWsDir)
+              } catch {}
+              try {
+                const projDir = join(dshHome(), 'storages', 'session_projcache', 'sessions')
+                for (const sid of cwsSessionIds) {
+                  await fsP.rm(join(projDir, sid + '.json'), { force: true }).catch(() => {})
+                }
+              } catch {}
+              if (!finalWorkspacePath) finalWorkspacePath = targetWorkspacePath
+              const key = targetWs.id || ('__new__' + targetWorkspacePath)
+              if (!byWorkspace[key]) byWorkspace[key] = { id: targetWs.id, path: targetWorkspacePath, title: targetWs.title, sessionIds: [] }
+              for (const sid of cwsSessionIds) {
+                if (!byWorkspace[key].sessionIds.includes(sid)) byWorkspace[key].sessionIds.push(sid)
+              }
+              applied.push(src.to + ' -> ' + targetDirName + ' (' + cloudBase + ', ' + cwsSessionIds.length + ')')
             }
-            // 精准合并 workspace.json 索引
             try {
-              const workspaceJsonPath = join(homedir(), '.dsh', 'storages', 'workspace.json')
+              const workspaceJsonPath = join(dshHome(), 'storages', 'workspace.json')
               let wsData = null
               try { wsData = JSON.parse(await fsP.readFile(workspaceJsonPath, 'utf8')) } catch {}
               if (wsData && wsData.tables && wsData.tables.workspaces) {
-                let wsId = null
-                for (const [id, w] of Object.entries(wsData.tables.workspaces)) {
-                  if (w.path === targetWorkspacePath) { wsId = id; break }
-                }
-                if (!wsId) {
-                  wsId = randomUUID()
-                  wsData.tables.workspaces[wsId] = {
-                    path: targetWorkspacePath,
-                    title: targetWorkspacePath.split(/[\\/]/).filter(Boolean).pop() || 'Workspace',
-                    sessionIds: [],
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
+                for (const entry of Object.values(byWorkspace)) {
+                  let wsId = entry.id
+                  if (!wsId) {
+                    for (const [id, w] of Object.entries(wsData.tables.workspaces)) {
+                      if (w.path === entry.path) { wsId = id; break }
+                    }
                   }
-                  if (!Array.isArray(wsData.global.workspaceIds)) wsData.global.workspaceIds = []
-                  if (!wsData.global.workspaceIds.includes(wsId)) wsData.global.workspaceIds.push(wsId)
+                  if (!wsId) {
+                    wsId = randomUUID()
+                    wsData.tables.workspaces[wsId] = {
+                      path: entry.path,
+                      title: entry.title || entry.path.split(/[\\/]/).filter(Boolean).pop() || 'Workspace',
+                      sessionIds: [],
+                      createdAt: new Date().toISOString(),
+                      updatedAt: new Date().toISOString(),
+                    }
+                    if (!Array.isArray(wsData.global.workspaceIds)) wsData.global.workspaceIds = []
+                    if (!wsData.global.workspaceIds.includes(wsId)) wsData.global.workspaceIds.push(wsId)
+                  }
+                  const w = wsData.tables.workspaces[wsId]
+                  if (!Array.isArray(w.sessionIds)) w.sessionIds = []
+                  for (const sid of entry.sessionIds) {
+                    if (!w.sessionIds.includes(sid)) w.sessionIds.push(sid)
+                  }
+                  w.updatedAt = new Date().toISOString()
                 }
-                const w = wsData.tables.workspaces[wsId]
-                if (!Array.isArray(w.sessionIds)) w.sessionIds = []
-                for (const sid of downloadedSessionIds) {
-                  if (!w.sessionIds.includes(sid)) w.sessionIds.push(sid)
-                }
-                w.updatedAt = new Date().toISOString()
                 await fsP.writeFile(workspaceJsonPath, JSON.stringify(wsData, null, 2), 'utf8')
               }
-            } catch (e) { logger?.warn?.('dsh-sync: workspace.json update failed: ' + (e && e.message)) }
-            // 清掉 projcache（避免 DSH 把新下载的会话误判为空对话）
-            try {
-              const projDir = join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions')
-              for (const sid of downloadedSessionIds) {
-                await fsP.rm(join(projDir, sid + '.json'), { force: true }).catch(() => {})
-              }
-            } catch {}
-            // 修正每个会话文件里的 cwd 为本机工作区路径
-            try {
-              const zlib = require('node:zlib')
-              const walkFix = async (dir) => {
-                let ents = []
-                try { ents = await fsP.readdir(dir, { withFileTypes: true }) } catch { return }
-                for (const ent of ents) {
-                  const full = join(dir, ent.name)
-                  if (ent.isDirectory()) { await walkFix(full); continue }
-                  if (!ent.name.endsWith('.zstd')) continue
-                  try {
-                    const buf = await fsP.readFile(full)
-                    // 找所有 zstd frame 的 magic number (0x28 B5 2F FD)
-                    const positions = []
-                    for (let i = 0; i <= buf.length - 4; i++) {
-                      if (buf[i] === 0x28 && buf[i+1] === 0xB5 && buf[i+2] === 0x2F && buf[i+3] === 0xFD) positions.push(i)
-                    }
-                    if (positions.length === 0) continue
-                    const firstFrameEnd = positions.length > 1 ? positions[1] : buf.length
-                    const headerFrame = buf.slice(0, firstFrameEnd)
-                    const restFrames = positions.length > 1 ? buf.slice(firstFrameEnd) : Buffer.alloc(0)
-                    const text = zlib.zstdDecompressSync(headerFrame).toString('utf8')
-                    const lines = text.split('\n')
-                    if (!lines[0]) continue
-                    const obj = JSON.parse(lines[0])
-                    if (obj.cwd === targetWorkspacePath) continue
-                    obj.cwd = targetWorkspacePath
-                    lines[0] = JSON.stringify(obj)
-                    const newHeaderFrame = zlib.zstdCompressSync(Buffer.from(lines.join('\n'), 'utf8'))
-                    const out = Buffer.concat([newHeaderFrame, restFrames])
-                    await fsP.writeFile(full, out)
-                  } catch {}
-                }
-              }
-              await walkFix(targetWs)
-            } catch {}
-            applied.push(src.to + ' -> ' + targetDirName + ' (' + downloadedSessionIds.length + ' 已索引)')
-          } else if (group.name === 'plugins') {
+            } catch (e) { try { ctx.logger.warn('dsh-sync: workspace.json update failed: ' + (e && e.message)) } catch {} }
+} else if (group.name === 'plugins') {
             // plugins 组：只覆盖，不删本地目录（node_modules 等保命）
             await copyTree(source, src.from, {})
             applied.push(src.to + ' (merge)')
