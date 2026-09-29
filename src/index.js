@@ -1817,12 +1817,11 @@ module.exports = {
               try { wsData = JSON.parse(await fsP.readFile(workspaceJsonPath, 'utf8')) } catch {}
               if (wsData && wsData.tables && wsData.tables.workspaces) {
                 for (const entry of Object.values(byWorkspace)) {
-                  let wsId = entry.id
-                  if (!wsId) {
-                    for (const [id, w] of Object.entries(wsData.tables.workspaces)) {
-                      if (w.path === entry.path) { wsId = id; break }
-                    }
+                  let wsId = null
+                  for (const [id, w] of Object.entries(wsData.tables.workspaces)) {
+                    if (w.path === entry.path) { wsId = id; break }
                   }
+                  if (!wsId) wsId = entry.id
                   if (!wsId) {
                     wsId = randomUUID()
                     wsData.tables.workspaces[wsId] = {
