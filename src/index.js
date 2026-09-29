@@ -1703,6 +1703,7 @@ module.exports = {
             } catch {}
           } else if (group.name === 'sessions') {
             const zlib2 = require('node:zlib')
+            const downloadedSessionIds = []
             let localWorkspaces = []
             try {
               const wsFile2 = join(dshHome(), 'storages', 'workspace.json')
@@ -1743,9 +1744,8 @@ module.exports = {
                 return b === cloudBase || w.title === cloudBase
               })
               if (!targetWs) {
-                const fallback = (eff.downloadWorkspacePath && String(eff.downloadWorkspacePath).trim()) || (localWorkspaces[0] && localWorkspaces[0].path)
-                if (!fallback) continue
-                targetWs = { id: null, path: fallback, title: cloudBase }
+                applied.push(src.to + ' -> SKIP ' + cloudBase + ' (本机无同名工作区)')
+                continue
               }
               const targetWorkspacePath = targetWs.path
               const targetDirName = encodeWorkspaceDir(targetWorkspacePath)
