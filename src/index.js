@@ -1616,6 +1616,9 @@ module.exports = {
       for (const group of spec) {
         for (const src of group.sources) {
           const target = join(repoDir, src.to)
+          if (group.name === 'sessions') {
+            await fsP.rm(target, { recursive: true, force: true }).catch(() => {})
+          }
           if (src.file) {
             try {
               await fsP.access(src.from)
