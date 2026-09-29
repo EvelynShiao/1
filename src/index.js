@@ -1622,6 +1622,32 @@ module.exports = {
               await fsP.mkdir(join(target, '..'), { recursive: true })
               await fsP.copyFile(src.from, target)
             } catch {}
+          } else if (group.name === 'sessions') {
+            if (group.strategy === 'standalone') {
+              await fsP.rm(target, { recursive: true, force: true }).catch(() => {})
+            }
+            await fsP.mkdir(target, { recursive: true })
+            let wsDirsUp = []
+            try { wsDirsUp = await fsP.readdir(src.from, { withFileTypes: true }) } catch {}
+            for (const ws of wsDirsUp) {
+              if (!ws.isDirectory()) continue
+              const wsTarget = join(target, ws.name)
+              await fsP.mkdir(wsTarget, { recursive: true })
+              let sessionsUp = []
+              try { sessionsUp = await fsP.readdir(join(src.from, ws.name), { withFileTypes: true }) } catch {}
+              for (const s of sessionsUp) {
+                if (!s.isDirectory()) continue
+                const sPath = join(src.from, ws.name, s.name)
+                let filesUp = []
+                try { filesUp = await fsP.readdir(sPath) } catch {}
+                const zst = filesUp.find(x => x.endsWith('.zstd'))
+                if (!zst) continue
+                let st = null
+                try { st = await fsP.stat(join(sPath, zst)) } catch {}
+                if (!st || st.size < 1024) continue
+                await copyTree(sPath, join(wsTarget, s.name), {})
+              }
+            }
           } else {
             if (group.strategy === 'standalone') {
               await fsP.rm(target, { recursive: true, force: true }).catch(() => {})
@@ -1730,6 +1756,13 @@ module.exports = {
                 await fsP.writeFile(workspaceJsonPath, JSON.stringify(wsData, null, 2), 'utf8')
               }
             } catch (e) { logger?.warn?.('dsh-sync: workspace.json update failed: ' + (e && e.message)) }
+            // 清掉 projcache（避免 DSH 把新下载的会话误判为空对话）
+            try {
+              const projDir = join(homedir(), '.dsh', 'storages', 'session_projcache', 'sessions')
+              for (const sid of downloadedSessionIds) {
+                await fsP.rm(join(projDir, sid + '.json'), { force: true }).catch(() => {})
+              }
+            } catch {}
             // 修正每个会话文件里的 cwd 为本机工作区路径
             try {
               const zlib = require('node:zlib')
