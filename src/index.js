@@ -1754,6 +1754,14 @@ module.exports = {
               const targetDirName = encodeWorkspaceDir(targetWorkspacePath)
               const targetWsDir = join(localRoot, targetDirName)
               await fsP.mkdir(targetWsDir, { recursive: true })
+              try {
+                const olds = await fsP.readdir(targetWsDir, { withFileTypes: true })
+                for (const oe of olds) {
+                  if (oe.isDirectory() && oe.name.startsWith('session-')) {
+                    await fsP.rm(join(targetWsDir, oe.name), { recursive: true, force: true }).catch(() => {})
+                  }
+                }
+              } catch {}
               const cwsSessionIds = []
               for (const se of sessionsList) {
                 if (!se.isDirectory()) continue
@@ -1844,6 +1852,28 @@ module.exports = {
                 await fsP.writeFile(workspaceJsonPath, JSON.stringify(wsData, null, 2), 'utf8')
               }
             } catch (e) { try { ctx.logger.warn('dsh-sync: workspace.json update failed: ' + (e && e.message)) } catch {} }
+
+            if (allDownloadedSessionIds.length > 0) {
+              await new Promise((resolve) => {
+                try {
+                  ctx.inject(['workspaceRegistry'], async (svcs) => {
+                    try {
+                      const reg = svcs.workspaceRegistry
+                      for (const entry of Object.values(byWorkspace)) {
+                        if (!entry || !entry.path) continue
+                        let ws = await reg.resolveByPath(entry.path)
+                        if (!ws) ws = await reg.create(entry.path)
+                        for (const sid of entry.sessionIds || []) {
+                          try { await ws.detachSession(sid) } catch {}
+                          try { await ws.attachSession(sid) } catch (e) { try { ctx.logger.warn('attach ' + sid + ': ' + (e && e.message)) } catch {} }
+                        }
+                      }
+                    } catch (e) {}
+                    resolve()
+                  })
+                } catch { resolve() }
+              })
+            }
 } else if (group.name === 'plugins') {
             // plugins 组：只覆盖，不删本地目录（node_modules 等保命）
             await copyTree(source, src.from, {})
